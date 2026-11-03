@@ -3,6 +3,7 @@ import shutil
 import asyncio
 import logging
 import time
+import subprocess
 import concurrent.futures
 import io
 from google.oauth2 import service_account
@@ -99,12 +100,46 @@ async def download_videos_from_drive(folder_id: str, output_dir: str, expected_c
 
             for item in items:
                 file_path = os.path.join(output_dir, item['name'])
+                # ملاحظة: file_path لا يوجد إلا بعد اكتمال الضغط بنجاح (انظر أسفل)
+                # لذلك وجوده هنا يعني أن الملف جاهز تماماً للبث ولا حاجة لإعادة أي شيء.
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0: continue
+
+                raw_path = file_path + ".download"   # اسم مؤقت أثناء التحميل الخام من Drive
                 request = service.files().get_media(fileId=item['id'])
-                fh = io.FileIO(file_path, mode='wb')
+                fh = io.FileIO(raw_path, mode='wb')
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
                 while not done: _, done = downloader.next_chunk()
+
+                # === الضغط لمرة واحدة فقط (ليس أثناء البث المباشر) ===
+                # هذه هي نفس إعدادات الفيديو/الصوت التي كانت تُطبَّق سابقاً داخل أمر
+                # البث المباشر (360p / 10fps / 100k فيديو / 32k صوت)، لكن الآن تُطبَّق
+                # هنا فقط عند التحميل، بحيث لا يحتاج البث المباشر لاحقاً لأي ترميز (encoding)
+                # على الإطلاق. هذا لا يحتاج أن يعمل بالوقت الحقيقي (-re غير مستخدم هنا)
+                # لذلك لا مشكلة إن استغرق وقتاً أطول بسبب ضعف معالج الخطة المجانية.
+                tmp_out = file_path + ".tmp.mp4"
+                try:
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", raw_path,
+                        "-c:v", "libx264",
+                        "-vf", "scale=-2:360,fps=10",
+                        "-pix_fmt", "yuv420p",
+                        "-b:v", "100k", "-maxrate", "100k", "-bufsize", "100k",
+                        "-x264-params", "nal-hrd=cbr:force-cfr=1",  # معدل بت ثابت حقيقي (CBR) بلا أي قفزات
+                        "-preset", "veryfast",
+                        "-tune", "stillimage",
+                        "-g", "20",
+                        "-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "22050",
+                        tmp_out,
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=True)
+
+                    if os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+                        os.replace(tmp_out, file_path)  # إعادة تسمية ذرية: الملف النهائي يظهر دفعة واحدة فقط عند اكتماله
+                except Exception as enc_err:
+                    logger.error(f"فشل ضغط {item['name']}: {enc_err}")
+                    if os.path.exists(tmp_out): os.remove(tmp_out)
+                finally:
+                    if os.path.exists(raw_path): os.remove(raw_path)  # لا حاجة للاحتفاظ بالنسخة الخام الأكبر حجماً
             return True, "نجاح"
         except Exception as e: return False, str(e)
 
@@ -187,26 +222,13 @@ async def start_video_stream():
                             "last_error": None
                         })
 
+                        # الملف هنا مضغوط مسبقاً (360p/10fps/100k) أثناء التحميل من Drive،
+                        # لذلك البث المباشر الآن "نسخ" فقط (remux) بلا أي ترميز (encoding).
+                        # هذا يكاد لا يستهلك أي معالج، وهو ما يمنع التقطّع الناتج عن
+                        # ضعف/تحديد المعالج (CPU throttling) في الخطط المجانية مثل Koyeb.
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
-                            
-                            # إعدادات الفيديو (360p, 10 إطارات, 100 كيلوبت)
-                            "-c:v", "libx264",
-                            "-vf", "scale=-2:360,fps=10",
-                            "-pix_fmt", "yuv420p",        # [مهم جداً] هذا السطر يمنع الشاشة السوداء في تيلغرام
-                            "-b:v", "100k",               # رفعنا الدقة قليلاً لكي تظهر الصورة
-                            "-maxrate", "150k",
-                            "-bufsize", "300k",
-                            "-preset", "ultrafast",
-                            "-tune", "stillimage",
-                            "-g", "20",                   # إنشاء إطار رئيسي (Keyframe) كل ثانيتين لتسريع تحميل البث للمستمعين
-                            
-                            # إعدادات الصوت (Mono, 32 كيلوبت، معدل عينات 22050)
-                            "-c:a", "aac",
-                            "-b:a", "32k",
-                            "-ac", "1",
-                            "-ar", "22050",
-                            
+                            "-c", "copy",
                             "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
