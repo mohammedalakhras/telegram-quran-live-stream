@@ -522,7 +522,7 @@ async def api_manual_prefetch(part: int, password: str = Header(...)):
 
 # ==================== الواجهة الأمامية الاحترافية ====================
 @web_app.get("/", response_class=HTMLResponse)
-async def dashboard():
+async def dashboard(request: Request):
     # html_content = """
  
     # """
