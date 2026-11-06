@@ -528,8 +528,9 @@ async def dashboard():
     # """
     # return HTMLResponse(content=html_content)
     return templates.TemplateResponse(
-        "dashboard.html",
-        {"request": request, "channel_id": CHANNEL_ID}
+        request=request,
+        name="dashboard.html",
+        context={"channel_id": CHANNEL_ID}
     )
 
 if __name__ == "__main__":
