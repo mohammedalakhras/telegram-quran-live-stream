@@ -3,27 +3,47 @@ import shutil
 import asyncio
 import logging
 import time
-import subprocess
 import concurrent.futures
 import io
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+import json
+from collections import deque
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Header
+import psutil
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from fastapi import FastAPI, HTTPException, Header, Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+
+from fastapi.templating import Jinja2Templates
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+# ==================== إعداد السجلات الحية للوحة التحكم ====================
+log_buffer = deque(maxlen=60)
+
+class DequeLogHandler(logging.Handler):
+    def emit(self, record):
+        msg = self.format(record)
+        log_buffer.append(msg)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("QuranStreamer-RTMP")
+deque_handler = DequeLogHandler()
+deque_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"))
+logger.addHandler(deque_handler)
 
-# متغيرات البيئة الأساسية
+# ==================== متغيرات البيئة ====================
 RTMP_URL = os.getenv("RTMP_URL", "")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "قناتك")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@MohammedAlakhras")
 FOLDER_URL_1 = os.getenv("FOLDER_URL_1", "")
 FOLDER_URL_2 = os.getenv("FOLDER_URL_2", "")
 FOLDER_URL_3 = os.getenv("FOLDER_URL_3", "")
@@ -46,6 +66,28 @@ SURAH_NAMES = [
     "المسد", "الإخلاص", "الفلق", "الناس"
 ]
 
+# أوضاع جودة البث القابلة للتبديل من لوحة التحكم
+QUALITY_PROFILES = {
+    "ultra_saver": {
+        "label": "توفير فائق (240p - 25MB/ساعة)",
+        "scale": "scale=-2:240,fps=5",
+        "bv": "55k", "maxrate": "75k", "bufsize": "150k", "g": "10",
+        "ba": "24k", "ar": "22050"
+    },
+    "eco": {
+        "label": "اقتصادي متوازن (360p - 55MB/ساعة)",
+        "scale": "scale=-2:360,fps=10",
+        "bv": "100k", "maxrate": "140k", "bufsize": "280k", "g": "20",
+        "ba": "32k", "ar": "22050"
+    },
+    "standard": {
+        "label": "جودة عالية (480p - 120MB/ساعة)",
+        "scale": "scale=-2:480,fps=15",
+        "bv": "220k", "maxrate": "300k", "bufsize": "600k", "g": "30",
+        "ba": "64k", "ar": "44100"
+    }
+}
+
 stream_state = {
     "status": "جاري التهيئة...",
     "is_streaming": False,
@@ -61,7 +103,11 @@ stream_state = {
     "ping_count": 0,
     "last_error": None,
     "force_skip": False,
-    "target_surah_index": None
+    "target_surah_index": None,
+    "loop_current_surah": False,
+    "quality_profile": "eco",
+    "is_downloading": False,
+    "downloading_folder": "-"
 }
 
 video_files = []
@@ -74,78 +120,155 @@ for i in range(1, 115):
     else:
         video_files.append((i, f"vid3/{file_name}"))
 
-async def download_videos_from_drive(folder_id: str, output_dir: str, expected_count: int = 0):
-    if not folder_id or not GDRIVE_CREDENTIALS_JSON: return
-    os.makedirs(output_dir, exist_ok=True)
+# متغيرات لحساب سرعة نقل البيانات اللحظية (Bitrate/Network Speed)
+net_io_start = psutil.net_io_counters()
+last_net_check_ts = time.time()
+last_bytes_sent = net_io_start.bytes_sent
+last_bytes_recv = net_io_start.bytes_recv
+current_upload_kbps = 0.0
+current_download_kbps = 0.0
 
-    # فحص ذكي: هل الملفات موجودة مسبقاً ومكتملة؟
-    existing_files = [f for f in os.listdir(output_dir) if f.endswith('.mp4') and os.path.getsize(os.path.join(output_dir, f)) > 0]
-    if len(existing_files) >= expected_count and expected_count > 0:
-        logger.info(f"المجلد {output_dir} مكتمل مسبقاً. سيتم تخطي التحميل لتوفير الموارد.")
+
+# ==================== دوال حساب المساحة والموارد ====================
+def format_bytes(size_bytes: float) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes:.0f} B"
+    elif size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 ** 3:
+        return f"{size_bytes / (1024 ** 2):.2f} MB"
+    else:
+        return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+def get_storage_and_files_info():
+    total_downloaded_bytes = 0
+    downloaded_indices = []
+
+    for num, path in video_files:
+        if os.path.exists(path):
+            fsize = os.path.getsize(path)
+            if fsize > 0:
+                total_downloaded_bytes += fsize
+                downloaded_indices.append(num)
+
+    disk = shutil.disk_usage(".")
+    return {
+        "downloaded_count": len(downloaded_indices),
+        "downloaded_indices": downloaded_indices,
+        "downloaded_size_bytes": total_downloaded_bytes,
+        "downloaded_size_formatted": format_bytes(total_downloaded_bytes),
+        "disk_total_formatted": format_bytes(disk.total),
+        "disk_used_formatted": format_bytes(disk.used),
+        "disk_free_formatted": format_bytes(disk.free),
+        "disk_free_bytes": disk.free,
+        "disk_percent": round((disk.used / disk.total) * 100, 1) if disk.total > 0 else 0.0
+    }
+
+def get_system_telemetry():
+    global last_net_check_ts, last_bytes_sent, last_bytes_recv, current_upload_kbps, current_download_kbps
+    now = time.time()
+    dt = max(now - last_net_check_ts, 0.5)
+
+    net_now = psutil.net_io_counters()
+    if now - last_net_check_ts >= 1.0:
+        up_diff = max(0, net_now.bytes_sent - last_bytes_sent)
+        down_diff = max(0, net_now.bytes_recv - last_bytes_recv)
+        current_upload_kbps = round((up_diff / 1024.0) / dt, 1)
+        current_download_kbps = round((down_diff / 1024.0) / dt, 1)
+        last_bytes_sent = net_now.bytes_sent
+        last_bytes_recv = net_now.bytes_recv
+        last_net_check_ts = now
+
+    total_sent_session = max(0, net_now.bytes_sent - net_io_start.bytes_sent)
+    total_recv_session = max(0, net_now.bytes_recv - net_io_start.bytes_recv)
+
+    vm = psutil.virtual_memory()
+    proc = psutil.Process(os.getpid())
+    try:
+        app_ram_bytes = proc.memory_info().rss
+        for child in proc.children(recursive=True):
+            app_ram_bytes += child.memory_info().rss
+    except Exception:
+        app_ram_bytes = proc.memory_info().rss
+
+    cpu_pct = psutil.cpu_percent(interval=None)
+
+    return {
+        "cpu_percent": round(cpu_pct, 1),
+        "ram_total_formatted": format_bytes(vm.total),
+        "ram_used_formatted": format_bytes(vm.used),
+        "ram_free_formatted": format_bytes(vm.available),
+        "ram_percent": round(vm.percent, 1),
+        "app_ram_formatted": format_bytes(app_ram_bytes),
+        "upload_speed_kbps": current_upload_kbps,
+        "download_speed_kbps": current_download_kbps,
+        "total_sent_formatted": format_bytes(total_sent_session),
+        "total_recv_formatted": format_bytes(total_recv_session),
+        "total_bandwidth_used_formatted": format_bytes(total_sent_session + total_recv_session)
+    }
+
+
+# ==================== دوال التحميل والبث ====================
+async def download_videos_from_drive(folder_id: str, output_dir: str, expected_count: int = 0):
+    if not folder_id or not GDRIVE_CREDENTIALS_JSON:
+        logger.warning(f"بيانات التحميل للمجلد {output_dir} غير مكتملة.")
         return
 
-    stream_state["status"] = f"جاري تحميل دفعة من جوجل درايف..."
+    os.makedirs(output_dir, exist_ok=True)
+
+    existing_files = [
+        f for f in os.listdir(output_dir)
+        if f.endswith('.mp4') and os.path.getsize(os.path.join(output_dir, f)) > 0
+    ]
+    if len(existing_files) >= expected_count and expected_count > 0:
+        logger.info(f"المجلد {output_dir} مكتمل مسبقاً ({len(existing_files)} ملف). تم تخطي التحميل.")
+        return
+
+    stream_state["is_downloading"] = True
+    stream_state["downloading_folder"] = output_dir
+    stream_state["status"] = f"جاري تحميل ملفات ({output_dir}) من Drive..."
+    logger.info(f"بدأ تحميل الفيديوهات عبر Google API إلى {output_dir}...")
 
     def _download():
         try:
-            import json
             creds_dict = json.loads(GDRIVE_CREDENTIALS_JSON)
             creds = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly'])
+                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
             service = build('drive', 'v3', credentials=creds)
 
             query = f"'{folder_id}' in parents and mimeType='video/mp4' and trashed=false"
-            results = service.files().list(q=query, pageSize=200, fields="nextPageToken, files(id, name)", orderBy="name").execute()
+            results = service.files().list(
+                q=query, pageSize=200, fields="nextPageToken, files(id, name)", orderBy="name"
+            ).execute()
             items = results.get('files', [])
 
             for item in items:
                 file_path = os.path.join(output_dir, item['name'])
-                # ملاحظة: file_path لا يوجد إلا بعد اكتمال الضغط بنجاح (انظر أسفل)
-                # لذلك وجوده هنا يعني أن الملف جاهز تماماً للبث ولا حاجة لإعادة أي شيء.
-                if os.path.exists(file_path) and os.path.getsize(file_path) > 0: continue
-
-                raw_path = file_path + ".download"   # اسم مؤقت أثناء التحميل الخام من Drive
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    continue
                 request = service.files().get_media(fileId=item['id'])
-                fh = io.FileIO(raw_path, mode='wb')
+                fh = io.FileIO(file_path, mode='wb')
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
-                while not done: _, done = downloader.next_chunk()
-
-                # === الضغط لمرة واحدة فقط (ليس أثناء البث المباشر) ===
-                # هذه هي نفس إعدادات الفيديو/الصوت التي كانت تُطبَّق سابقاً داخل أمر
-                # البث المباشر (360p / 10fps / 100k فيديو / 32k صوت)، لكن الآن تُطبَّق
-                # هنا فقط عند التحميل، بحيث لا يحتاج البث المباشر لاحقاً لأي ترميز (encoding)
-                # على الإطلاق. هذا لا يحتاج أن يعمل بالوقت الحقيقي (-re غير مستخدم هنا)
-                # لذلك لا مشكلة إن استغرق وقتاً أطول بسبب ضعف معالج الخطة المجانية.
-                tmp_out = file_path + ".tmp.mp4"
-                try:
-                    subprocess.run([
-                        "ffmpeg", "-y", "-i", raw_path,
-                        "-c:v", "libx264",
-                        "-vf", "scale=-2:360,fps=10",
-                        "-pix_fmt", "yuv420p",
-                        "-b:v", "100k", "-maxrate", "100k", "-bufsize", "100k",
-                        "-x264-params", "nal-hrd=cbr:force-cfr=1",  # معدل بت ثابت حقيقي (CBR) بلا أي قفزات
-                        "-preset", "veryfast",
-                        "-tune", "stillimage",
-                        "-g", "20",
-                        "-c:a", "aac", "-b:a", "32k", "-ac", "1", "-ar", "22050",
-                        tmp_out,
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=True)
-
-                    if os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
-                        os.replace(tmp_out, file_path)  # إعادة تسمية ذرية: الملف النهائي يظهر دفعة واحدة فقط عند اكتماله
-                except Exception as enc_err:
-                    logger.error(f"فشل ضغط {item['name']}: {enc_err}")
-                    if os.path.exists(tmp_out): os.remove(tmp_out)
-                finally:
-                    if os.path.exists(raw_path): os.remove(raw_path)  # لا حاجة للاحتفاظ بالنسخة الخام الأكبر حجماً
+                while not done:
+                    _, done = downloader.next_chunk()
             return True, "نجاح"
-        except Exception as e: return False, str(e)
+        except Exception as e:
+            return False, str(e)
 
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        await loop.run_in_executor(pool, _download)
+        ok, msg = await loop.run_in_executor(pool, _download)
+
+    stream_state["is_downloading"] = False
+    stream_state["downloading_folder"] = "-"
+    if ok:
+        logger.info(f"اكتمل تحميل المجلد {output_dir} بنجاح.")
+    else:
+        logger.error(f"فشل تحميل المجلد {output_dir}: {msg}")
+        stream_state["last_error"] = f"خطأ Drive API: {msg}"
+
 
 async def get_video_duration(filename: str) -> float:
     try:
@@ -159,21 +282,18 @@ async def get_video_duration(filename: str) -> float:
         if duration_str:
             return float(duration_str)
     except Exception as e:
-        logger.error(f"خطأ في حساب مدة {filename}: {e}")
+        logger.error(f"خطأ في قراءة مدة الملف {filename}: {e}")
     return 0.0
 
 
 async def start_video_stream():
     if not RTMP_URL:
-        logger.critical("متغير RTMP_URL مفقود! لا يمكن بدء البث.")
-        stream_state["status"] = "خطأ: رابط RTMP مفقود."
+        logger.critical("متغير RTMP_URL مفقود! لن يبدأ البث حتى تتم إضافته.")
+        stream_state["status"] = "خطأ: متغير RTMP_URL غير موجود"
         return
-
-    # تم إزالة كود نظام الحضور الذي كان يسبب المشكلة
 
     prefetch_task = None
     try:
-        stream_state["status"] = "جاري الفحص والتحميل..."
         await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
 
         while True:
@@ -185,50 +305,76 @@ async def start_video_stream():
 
                 surah_num, video_path = video_files[i]
                 surah_name = SURAH_NAMES[surah_num - 1]
+                next_idx = (surah_num - 1) if stream_state["loop_current_surah"] else (surah_num % 114)
+                next_surah_name = SURAH_NAMES[next_idx]
                 stream_state["force_skip"] = False
 
-                # التحميل المسبق الذكي
-                if surah_num == 45: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
-                elif surah_num == 51 and prefetch_task: await prefetch_task
-                elif surah_num == 90: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
-                elif surah_num == 101 and prefetch_task: await prefetch_task
+                # التحميل المسبق الذكي دون حذف الملفات القديمة
+                if surah_num == 45:
+                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
+                elif surah_num == 51 and prefetch_task:
+                    await prefetch_task
+                elif surah_num == 90:
+                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
+                elif surah_num == 101 and prefetch_task:
+                    await prefetch_task
 
                 is_played = False
                 retry_count = 0
-                
+
                 while not is_played and not stream_state["force_skip"] and stream_state["target_surah_index"] is None:
                     duration = await get_video_duration(video_path) if os.path.exists(video_path) else 0.0
-                    
+
                     if duration == 0.0:
                         retry_count += 1
-                        stream_state["status"] = f"جاري تحميل سورة {surah_name} ({retry_count})..."
-                        if os.path.exists(video_path): os.remove(video_path)
-                        
-                        if 1 <= surah_num <= 50: await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
-                        elif 51 <= surah_num <= 100: await download_videos_from_drive(FOLDER_URL_2, "vid2", 50)
-                        else: await download_videos_from_drive(FOLDER_URL_3, "vid3", 14)
-                        
+                        stream_state["status"] = f"جاري تحميل سورة {surah_name} (محاولة {retry_count})..."
+                        if os.path.exists(video_path):
+                            os.remove(video_path)
+
+                        if 1 <= surah_num <= 50:
+                            await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
+                        elif 51 <= surah_num <= 100:
+                            await download_videos_from_drive(FOLDER_URL_2, "vid2", 50)
+                        else:
+                            await download_videos_from_drive(FOLDER_URL_3, "vid3", 14)
+
                         await asyncio.sleep(3)
                         continue
 
                     try:
+                        profile_key = stream_state.get("quality_profile", "eco")
+                        prof = QUALITY_PROFILES.get(profile_key, QUALITY_PROFILES["eco"])
+
+                        current_file_size = os.path.getsize(video_path) if os.path.exists(video_path) else 0
                         stream_state.update({
-                            "status": "يبث مباشرة 🟢 (توفير عالي)", 
-                            "is_streaming": True, 
+                            "status": f"يبث مباشرة 🟢 ({prof['label'].split('(')[0].strip()})",
+                            "is_streaming": True,
                             "current_surah_index": surah_num,
-                            "current_surah_name": f"سورة {surah_name}", 
-                            "duration_seconds": round(duration, 1), 
+                            "current_surah_name": f"سورة {surah_name}",
+                            "next_surah_name": f"سورة {next_surah_name}",
+                            "current_file": f"{video_path} ({format_bytes(current_file_size)})",
+                            "duration_seconds": round(duration, 1),
                             "started_at_ts": time.time(),
                             "last_error": None
                         })
 
-                        # الملف هنا مضغوط مسبقاً (360p/10fps/100k) أثناء التحميل من Drive،
-                        # لذلك البث المباشر الآن "نسخ" فقط (remux) بلا أي ترميز (encoding).
-                        # هذا يكاد لا يستهلك أي معالج، وهو ما يمنع التقطّع الناتج عن
-                        # ضعف/تحديد المعالج (CPU throttling) في الخطط المجانية مثل Koyeb.
+                        logger.info(f"بدأ بث: سورة {surah_name} | الدقة: {profile_key} | المدة: {duration:.0f} ثانية")
+
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
-                            "-c", "copy",
+                            "-c:v", "libx264",
+                            "-vf", prof["scale"],
+                            "-pix_fmt", "yuv420p",
+                            "-b:v", prof["bv"],
+                            "-maxrate", prof["maxrate"],
+                            "-bufsize", prof["bufsize"],
+                            "-preset", "ultrafast",
+                            "-tune", "stillimage",
+                            "-g", prof["g"],
+                            "-c:a", "aac",
+                            "-b:a", prof["ba"],
+                            "-ac", "1",
+                            "-ar", prof["ar"],
                             "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
@@ -236,37 +382,44 @@ async def start_video_stream():
                         while ffmpeg_proc.returncode is None:
                             if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
                                 ffmpeg_proc.terminate()
+                                logger.info(f"تم إيقاف/تخطي سورة {surah_name} بأمر المشرف.")
                                 break
                             await asyncio.sleep(1)
 
                         is_played = True
                     except Exception as e:
-                        logger.error(f"خطأ بث {video_path}: {e}")
+                        logger.error(f"خطأ أثناء بث {video_path}: {e}")
                         stream_state["last_error"] = str(e)
                         await asyncio.sleep(5)
-                
-                if stream_state["target_surah_index"] is None: i += 1
+
+                if stream_state["target_surah_index"] is None:
+                    if not stream_state["loop_current_surah"]:
+                        i += 1
+                    else:
+                        logger.info(f"إعادة تكرار سورة {surah_name} (وضع التكرار مفعل).")
 
             stream_state["completed_khatmas"] += 1
-            stream_state["status"] = "اكتملت الختمة، جاري الفحص لإعادتها..."
-            
+            logger.info(f"🎉 اكتملت الختمة رقم {stream_state['completed_khatmas']} بحمد الله!")
             await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
 
     except asyncio.CancelledError:
-        logger.info("تم إيقاف مهمة البث المباشر.")
+        logger.info("تم إيقاف محرك البث.")
     except Exception as e:
-        logger.critical(f"خطأ حرج في محرك البث: {e}")
+        logger.critical(f"خطأ حرج في البث: {e}")
         stream_state["status"] = f"توقف بسبب خطأ: {e}"
         stream_state["is_streaming"] = False
         stream_state["last_error"] = str(e)
 
+
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
+    psutil.cpu_percent(interval=None)
     stream_task = asyncio.create_task(start_video_stream())
     yield
     stream_task.cancel()
 
-web_app = FastAPI(title="لوحة البث المباشر للقرآن الكريم (RTMP)", lifespan=lifespan)
+
+web_app = FastAPI(title="لوحة البث القرآني الاحترافية (RTMP)", lifespan=lifespan)
 
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -276,11 +429,11 @@ def format_seconds(seconds: float) -> str:
         return f"{hrs:02d}:{mins:02d}:{secs:02d}"
     return f"{mins:02d}:{secs:02d}"
 
-@web_app.get("/ping")
+@web_app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     stream_state["ping_count"] += 1
-    stream_state["last_ping_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return JSONResponse({"ok": True})
+    stream_state["last_ping_time"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    return JSONResponse({"ok": True, "ping_count": stream_state["ping_count"]})
 
 @web_app.get("/api/status")
 async def api_status():
@@ -295,8 +448,8 @@ async def api_status():
         progress_pct = round((elapsed / stream_state["duration_seconds"]) * 100, 1)
 
     uptime_sec = now - stream_state["server_start_ts"]
-    
-    downloaded_files = [num for num, path in video_files if os.path.exists(path) and os.path.getsize(path) > 0]
+    storage_info = get_storage_and_files_info()
+    telemetry = get_system_telemetry()
 
     return {
         **stream_state,
@@ -306,163 +459,79 @@ async def api_status():
         "duration_formatted": format_seconds(stream_state["duration_seconds"]),
         "progress_pct": progress_pct,
         "uptime_formatted": format_seconds(uptime_sec),
-        "downloaded_files_count": len(downloaded_files),
+        "storage": storage_info,
+        "telemetry": telemetry,
+        "logs": list(log_buffer)[-35:],
         "surah_names": SURAH_NAMES
     }
 
+
+# ==================== نقاط التحكم الإدارية ====================
 def verify_admin(password: str):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="كلمة المرور غير صحيحة")
+        raise HTTPException(status_code=401, detail="كلمة المرور غير صحيحة!")
 
 @web_app.post("/api/skip")
 async def api_skip(password: str = Header(...)):
     verify_admin(password)
     stream_state["force_skip"] = True
-    return {"message": "تم إرسال أمر تخطي السورة الحالية"}
+    return {"message": "⏭ تم إرسال أمر تخطي السورة الحالية"}
 
 @web_app.post("/api/jump/{surah_index}")
 async def api_jump(surah_index: int, password: str = Header(...)):
     verify_admin(password)
     if 1 <= surah_index <= 114:
         stream_state["target_surah_index"] = surah_index
-        return {"message": f"جاري الانتقال إلى سورة {SURAH_NAMES[surah_index - 1]}"}
-    raise HTTPException(status_code=400, detail="رقم السورة غير صحيح")
+        return {"message": f"🚀 جاري الانتقال الفوري إلى سورة {SURAH_NAMES[surah_index - 1]}"}
+    raise HTTPException(status_code=400, detail="رقم السورة غير صالح")
+
+@web_app.post("/api/loop")
+async def api_toggle_loop(password: str = Header(...)):
+    verify_admin(password)
+    stream_state["loop_current_surah"] = not stream_state["loop_current_surah"]
+    state_txt = "مفعّل 🔁" if stream_state["loop_current_surah"] else "متوقف ➡️"
+    logger.info(f"تغيير وضع تكرار السورة الحالية إلى: {state_txt}")
+    return {"message": f"وضع تكرار السورة الحالية الآن: {state_txt}", "loop": stream_state["loop_current_surah"]}
+
+@web_app.post("/api/quality/{profile}")
+async def api_set_quality(profile: str, password: str = Header(...)):
+    verify_admin(password)
+    if profile not in QUALITY_PROFILES:
+        raise HTTPException(status_code=400, detail="وضع الجودة غير معروف")
+    stream_state["quality_profile"] = profile
+    # إعادة تشغيل السورة الحالية فوراً بالجودة الجديدة
+    stream_state["target_surah_index"] = max(1, stream_state["current_surah_index"])
+    logger.info(f"تم تغيير جودة البث إلى: {QUALITY_PROFILES[profile]['label']}")
+    return {"message": f"✅ تم تطبيق الجودة: {QUALITY_PROFILES[profile]['label']}"}
+
+@web_app.post("/api/prefetch/{part}")
+async def api_manual_prefetch(part: int, password: str = Header(...)):
+    verify_admin(password)
+    if stream_state["is_downloading"]:
+        return {"message": "⏳ هناك عملية تحميل جارية بالفعل في الخلفية!"}
+    if part == 1:
+        asyncio.create_task(download_videos_from_drive(FOLDER_URL_1, "vid", 50))
+    elif part == 2:
+        asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
+    elif part == 3:
+        asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
+    else:
+        raise HTTPException(status_code=400, detail="رقم الدفعة غير صحيح")
+    return {"message": f"📥 بدأ فحص وتحميل الدفعة رقم {part} في الخلفية"}
 
 
+# ==================== الواجهة الأمامية الاحترافية ====================
 @web_app.get("/", response_class=HTMLResponse)
 async def dashboard():
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>لوحة البث التفاعلية (RTMP)</title>
-        <style>
-            :root { --bg: #0f172a; --card: #1e293b; --accent: #10b981; --accent-hover: #059669; --text: #f8fafc; --muted: #94a3b8; --danger: #ef4444; }
-            * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
-            body { margin: 0; padding: 24px; background-color: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }
-            .container { width: 100%; max-width: 850px; background: var(--card); border-radius: 16px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08); }
-            .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 16px; margin-bottom: 24px; }
-            .title { font-size: 1.4rem; font-weight: 700; margin: 0; }
-            .badge { background: rgba(16, 185, 129, 0.15); color: var(--accent); padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 0.9rem;}
-            .surah-box { text-align: center; background: rgba(15, 23, 42, 0.6); padding: 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); }
-            .surah-label { color: var(--muted); font-size: 0.95rem; margin-bottom: 8px; }
-            .surah-name { font-size: 2.2rem; font-weight: 800; color: var(--accent); margin: 4px 0 16px; }
-            .progress-bar { width: 100%; height: 10px; background: #334155; border-radius: 999px; overflow: hidden; margin-bottom: 10px; }
-            .progress-fill { height: 100%; background: linear-gradient(90deg, #059669, #10b981); width: 0%; transition: width 0.5s linear; }
-            .time-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.9rem; }
-            .control-panel { background: rgba(15, 23, 42, 0.8); padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px dashed rgba(255,255,255,0.2); }
-            .control-title { font-size: 1.1rem; font-weight: 600; margin-top: 0; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; color: #e2e8f0; }
-            .control-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 15px; }
-            input[type="password"] { background: #334155; border: 1px solid #475569; color: white; padding: 10px 14px; border-radius: 8px; outline: none; width: 180px; }
-            select { background: #334155; border: 1px solid #475569; color: white; padding: 10px 14px; border-radius: 8px; outline: none; flex-grow: 1; cursor: pointer; }
-            button { padding: 10px 18px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
-            .btn-primary { background: var(--accent); color: white; }
-            .btn-danger { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4); }
-            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
-            .stat-card { background: rgba(15, 23, 42, 0.45); padding: 14px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); }
-            .stat-label { color: var(--muted); font-size: 0.85rem; margin-bottom: 6px; }
-            .stat-value { font-size: 1.05rem; font-weight: 700; }
-            .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 12px 24px; border-radius: 8px; border: 1px solid #475569; display: none; z-index: 1000; font-weight: 600;}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1 class="title">📡 لوحة البث المباشر للقرآن الكريم</h1>
-                <span class="badge" id="status-badge">جاري التحميل...</span>
-            </div>
-            <div class="surah-box">
-                <div class="surah-label">السورة التي تُبث الآن عبر القناة (<span id="surah-num">0</span> / 114)</div>
-                <div class="surah-name" id="surah-name">...</div>
-                <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-                <div class="time-row">
-                    <span>المنقضي: <strong id="elapsed">00:00</strong></span>
-                    <span>المدة الكلية: <strong id="duration">00:00</strong></span>
-                    <span>المتبقي: <strong id="remaining">00:00</strong></span>
-                </div>
-            </div>
-            <div class="control-panel">
-                <h3 class="control-title">⚙️ أدوات التحكم بالبث المباشر (RTMP)</h3>
-                <div class="control-row">
-                    <input type="password" id="admin-pass" placeholder="كلمة مرور المشرف..." required>
-                    <button class="btn-danger" onclick="skipSurah()">⏭ تخطي السورة</button>
-                </div>
-                <div class="control-row">
-                    <select id="surah-selector">
-                        <option value="" disabled selected>-- اختر سورة للقفز إليها وبثها الآن --</option>
-                    </select>
-                    <button class="btn-primary" onclick="jumpToSurah()">🚀 تشغيل فوراً</button>
-                </div>
-            </div>
-            <div class="grid">
-                <div class="stat-card"><div class="stat-label">الملفات الجاهزة محلياً</div><div class="stat-value"><span id="downloaded-count">0</span> / 114 ملف</div></div>
-                <div class="stat-card"><div class="stat-label">القناة المستهدفة</div><div class="stat-value" id="channel-id">-</div></div>
-                <div class="stat-card"><div class="stat-label">عدد الختمات المكتملة</div><div class="stat-value" id="khatmas">0</div></div>
-                <div class="stat-card"><div class="stat-label">مدة تشغيل السيرفر</div><div class="stat-value" id="uptime">00:00</div></div>
-            </div>
-        </div>
-        <div id="toast" class="toast"></div>
-        <script>
-            let surahsLoaded = false;
-            function showToast(message, isError = false) {
-                const toast = document.getElementById('toast');
-                toast.textContent = message;
-                toast.style.backgroundColor = isError ? '#ef4444' : '#10b981';
-                toast.style.display = 'block';
-                setTimeout(() => toast.style.display = 'none', 4000);
-            }
-            async function sendCommand(endpoint) {
-                const pass = document.getElementById('admin-pass').value;
-                if (!pass) { showToast('يرجى إدخال كلمة المرور أولاً!', true); return; }
-                try {
-                    const res = await fetch(endpoint, { method: 'POST', headers: { 'password': pass } });
-                    const data = await res.json();
-                    if (res.ok) { showToast(data.message); fetchStatus(); } 
-                    else { showToast(data.detail || 'خطأ في العملية', true); }
-                } catch (e) { showToast('فشل الاتصال بالخادم', true); }
-            }
-            function skipSurah() { sendCommand('/api/skip'); }
-            function jumpToSurah() {
-                const idx = document.getElementById('surah-selector').value;
-                if (!idx) { showToast('يرجى اختيار سورة', true); return; }
-                sendCommand(`/api/jump/${idx}`);
-            }
-            async function fetchStatus() {
-                try {
-                    const res = await fetch('/api/status');
-                    const data = await res.json();
-                    document.getElementById('status-badge').textContent = data.status;
-                    document.getElementById('surah-num').textContent = data.current_surah_index;
-                    document.getElementById('surah-name').textContent = data.current_surah_name;
-                    document.getElementById('channel-id').textContent = data.channel_id;
-                    document.getElementById('khatmas').textContent = data.completed_khatmas;
-                    document.getElementById('uptime').textContent = data.uptime_formatted;
-                    document.getElementById('elapsed').textContent = data.elapsed_formatted;
-                    document.getElementById('duration').textContent = data.duration_formatted;
-                    document.getElementById('remaining').textContent = data.remaining_formatted;
-                    document.getElementById('downloaded-count').textContent = data.downloaded_files_count;
-                    document.getElementById('progress-fill').style.width = data.progress_pct + '%';
-                    if (!surahsLoaded && data.surah_names) {
-                        const selector = document.getElementById('surah-selector');
-                        data.surah_names.forEach((name, index) => {
-                            const opt = document.createElement('option');
-                            opt.value = index + 1;
-                            opt.textContent = `${index + 1}. سورة ${name}`;
-                            selector.appendChild(opt);
-                        });
-                        surahsLoaded = true;
-                    }
-                } catch (e) {}
-            }
-            fetchStatus(); setInterval(fetchStatus, 2000);
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+    # html_content = """
+ 
+    # """
+    # return HTMLResponse(content=html_content)
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {"request": request, "channel_id": CHANNEL_ID}
+    )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:web_app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("app:web_app", host="0.0.0.0", port=PORT, log_level="info")

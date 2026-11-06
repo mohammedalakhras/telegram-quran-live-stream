@@ -1,0 +1,646 @@
+   <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>مركز القيادة والتحكم | البث القرآني المباشر 24/7</title>
+        <link href="https://fonts.googleapis.com/css2?family=Amiri:wght@700&family=Tajawal:wght@400;500;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+        <style>
+            :root {
+                --bg-deep: #060d1a;
+                --bg-card: #0f172a;
+                --bg-card-inner: #1e293b;
+                --emerald: #10b981;
+                --emerald-dark: #059669;
+                --gold: #f59e0b;
+                --cyan: #06b6d4;
+                --danger: #ef4444;
+                --text-main: #f8fafc;
+                --text-muted: #94a3b8;
+                --border: rgba(255, 255, 255, 0.08);
+            }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                font-family: 'Tajawal', sans-serif;
+                background: radial-gradient(circle at top right, #064e3b 0%, var(--bg-deep) 45%);
+                color: var(--text-main);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .dashboard-wrapper {
+                max-width: 1280px;
+                margin: 0 auto;
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+            /* الشريط العلوي */
+            .top-nav {
+                background: rgba(15, 23, 42, 0.85);
+                backdrop-filter: blur(12px);
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                padding: 18px 26px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 14px;
+                box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+            }
+            .brand {
+                display: flex;
+                align-items: center;
+                gap: 14px;
+            }
+            .brand-icon {
+                width: 46px;
+                height: 46px;
+                border-radius: 12px;
+                background: linear-gradient(135deg, var(--emerald), #047857);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.5rem;
+                box-shadow: 0 4px 15px rgba(16, 185, 129, 0.35);
+            }
+            .brand-title {
+                font-family: 'Amiri', serif;
+                font-size: 1.65rem;
+                color: #fff;
+            }
+            .brand-sub {
+                font-size: 0.85rem;
+                color: var(--text-muted);
+            }
+            .status-pills {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+            .pill {
+                padding: 7px 15px;
+                border-radius: 999px;
+                font-size: 0.88rem;
+                font-weight: 700;
+                background: rgba(16, 185, 129, 0.15);
+                color: #6ee7b7;
+                border: 1px solid rgba(16, 185, 129, 0.3);
+            }
+            .pill.gold {
+                background: rgba(245, 158, 11, 0.15);
+                color: #fde68a;
+                border-color: rgba(245, 158, 11, 0.3);
+            }
+
+            /* شبكة النظام الرئيسية */
+            .main-grid {
+                display: grid;
+                grid-template-columns: 1.35fr 1fr;
+                gap: 20px;
+            }
+            @media (max-width: 980px) {
+                .main-grid { grid-template-columns: 1fr; }
+            }
+
+            .card {
+                background: rgba(15, 23, 42, 0.9);
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                padding: 22px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            }
+            .card-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 16px;
+                padding-bottom: 12px;
+                border-bottom: 1px solid var(--border);
+            }
+            .card-title {
+                font-size: 1.15rem;
+                font-weight: 800;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: #e2e8f0;
+            }
+
+            /* بطاقة السورة الحالية */
+            .now-playing-box {
+                background: linear-gradient(145deg, rgba(6, 78, 59, 0.4), rgba(15, 23, 42, 0.9));
+                border: 1px solid rgba(16, 185, 129, 0.25);
+                border-radius: 14px;
+                padding: 22px;
+                text-align: center;
+                margin-bottom: 18px;
+                position: relative;
+            }
+            .surah-counter {
+                font-size: 0.9rem;
+                color: #a7f3d0;
+                font-weight: 600;
+            }
+            .surah-main-name {
+                font-family: 'Amiri', serif;
+                font-size: 2.7rem;
+                color: #ffffff;
+                margin: 6px 0 14px;
+                text-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            }
+            .progress-track {
+                width: 100%;
+                height: 12px;
+                background: #1e293b;
+                border-radius: 999px;
+                overflow: hidden;
+                margin-bottom: 10px;
+                border: 1px solid rgba(255,255,255,0.08);
+            }
+            .progress-bar-fill {
+                height: 100%;
+                width: 0%;
+                background: linear-gradient(90deg, var(--emerald-dark), var(--emerald), #34d399);
+                transition: width 0.5s linear;
+            }
+            .time-stats {
+                display: flex;
+                justify-content: space-between;
+                font-size: 0.88rem;
+                color: var(--text-muted);
+                font-family: 'JetBrains Mono', monospace;
+            }
+
+            /* مقاييس الموارد الحية (Gauges & Telemetry) */
+            .telemetry-grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 14px;
+            }
+            .metric-box {
+                background: rgba(30, 41, 59, 0.6);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 14px 16px;
+            }
+            .metric-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+                font-size: 0.88rem;
+                color: var(--text-muted);
+            }
+            .metric-val {
+                font-size: 1.25rem;
+                font-weight: 800;
+                font-family: 'JetBrains Mono', monospace;
+                color: #fff;
+            }
+            .mini-bar {
+                height: 7px;
+                background: #0f172a;
+                border-radius: 999px;
+                overflow: hidden;
+                margin: 8px 0 6px;
+            }
+            .mini-bar-fill {
+                height: 100%;
+                width: 0%;
+                border-radius: 999px;
+                transition: width 0.4s ease;
+            }
+            .metric-sub {
+                font-size: 0.78rem;
+                color: var(--text-muted);
+                display: flex;
+                justify-content: space-between;
+            }
+
+            /* أزرار وأدوات التحكم */
+            .controls-group {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+            }
+            .control-row {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+            input, select {
+                background: #1e293b;
+                border: 1px solid #334155;
+                color: #fff;
+                padding: 10px 14px;
+                border-radius: 10px;
+                font-family: 'Tajawal', sans-serif;
+                font-size: 0.95rem;
+                outline: none;
+            }
+            input:focus, select:focus { border-color: var(--emerald); }
+            .btn {
+                padding: 10px 16px;
+                border-radius: 10px;
+                border: none;
+                font-family: 'Tajawal', sans-serif;
+                font-weight: 700;
+                font-size: 0.92rem;
+                cursor: pointer;
+                transition: all 0.2s;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .btn-emerald { background: var(--emerald); color: #042f2e; }
+            .btn-emerald:hover { filter: brightness(1.1); }
+            .btn-danger { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4); }
+            .btn-danger:hover { background: rgba(239, 68, 68, 0.35); }
+            .btn-gold { background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.4); }
+            .btn-gold.active { background: var(--gold); color: #000; }
+            .btn-slate { background: #1e293b; color: #cbd5e1; border: 1px solid #334155; font-size: 0.84rem; padding: 8px 12px; }
+            .btn-slate:hover { border-color: var(--cyan); color: #fff; }
+
+            /* خريطة السور الـ 114 */
+            .surah-matrix {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+                gap: 6px;
+                max-height: 250px;
+                overflow-y: auto;
+                padding: 6px;
+                background: #090f1d;
+                border-radius: 12px;
+                border: 1px solid var(--border);
+            }
+            .surah-cell {
+                padding: 7px 6px;
+                border-radius: 8px;
+                font-size: 0.78rem;
+                text-align: center;
+                background: #1e293b;
+                color: #64748b;
+                cursor: pointer;
+                border: 1px solid transparent;
+                transition: all 0.15s;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .surah-cell:hover { transform: translateY(-2px); border-color: #94a3b8; color: #fff; }
+            .surah-cell.downloaded {
+                background: rgba(16, 185, 129, 0.14);
+                color: #6ee7b7;
+                border-color: rgba(16, 185, 129, 0.3);
+            }
+            .surah-cell.playing {
+                background: linear-gradient(135deg, #f59e0b, #d97706);
+                color: #000;
+                font-weight: 800;
+                box-shadow: 0 0 12px rgba(245, 158, 11, 0.6);
+            }
+
+            /* نافذة السجلات الحية */
+            .terminal-box {
+                background: #020617;
+                border: 1px solid #1e293b;
+                border-radius: 12px;
+                padding: 14px;
+                height: 210px;
+                overflow-y: auto;
+                font-family: 'JetBrains Mono', monospace;
+                font-size: 0.78rem;
+                direction: ltr;
+                text-align: left;
+                line-height: 1.6;
+                color: #94a3b8;
+            }
+            .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 2px 0; }
+            .log-line.err { color: #f87171; }
+            .log-line.ok { color: #34d399; }
+
+            .toast {
+                position: fixed;
+                bottom: 24px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: #0f172a;
+                color: #fff;
+                padding: 12px 24px;
+                border-radius: 10px;
+                border: 2px solid var(--emerald);
+                font-weight: 700;
+                display: none;
+                z-index: 9999;
+                box-shadow: 0 15px 35px rgba(0,0,0,0.5);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="dashboard-wrapper">
+            <!-- الشريط العلوي -->
+            <div class="top-nav">
+                <div class="brand">
+                    <div class="brand-icon">🕌</div>
+                    <div>
+                        <div class="brand-title">مركز القيادة والتحكم — البث القرآني المباشر 24/7</div>
+                        <div class="brand-sub">بث تلفزيوني سحابي عبر بروتوكول RTMP | القناة: <strong id="channel-id" style="color:#6ee7b7;">-</strong></div>
+                    </div>
+                </div>
+                <div class="status-pills">
+                    <span class="pill" id="status-badge">جاري الاتصال...</span>
+                    <span class="pill gold">الختمات: <span id="khatmas">0</span></span>
+                    <span class="pill" style="background:rgba(6,182,212,0.15); color:#67e8f9; border-color:rgba(6,182,212,0.3);">مدة التشغيل: <span id="uptime">00:00</span></span>
+                </div>
+            </div>
+
+            <!-- القسم الرئيسي: مشغل السورة + مراقبة الموارد -->
+            <div class="main-grid">
+                <!-- العمود الأيمن: البث الحالي والتحكم -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📡 حالة البث المباشر والتحكم الفوري</div>
+                        <span style="font-size:0.82rem; color:var(--text-muted);" id="current-file-label">-</span>
+                    </div>
+
+                    <div class="now-playing-box">
+                        <div class="surah-counter">السورة الحالية (<span id="surah-num">0</span> من 114) — القادمة: <strong id="next-surah">-</strong></div>
+                        <div class="surah-main-name" id="surah-name">...</div>
+                        <div class="progress-track"><div class="progress-bar-fill" id="progress-fill"></div></div>
+                        <div class="time-stats">
+                            <span>المنقضي: <strong id="elapsed" style="color:#fff;">00:00</strong></span>
+                            <span>التقدم: <strong id="progress-text" style="color:#34d399;">0%</strong></span>
+                            <span>المتبقي: <strong id="remaining" style="color:#fff;">00:00</strong></span>
+                            <span>المدة: <strong id="duration" style="color:#fff;">00:00</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- لوحة التحكم المحمية -->
+                    <div class="controls-group">
+                        <div class="control-row">
+                            <input type="password" id="admin-pass" placeholder="🔑 كلمة مرور المشرف..." style="width:190px;">
+                            <button class="btn btn-danger" onclick="skipSurah()">⏭ تخطي السورة</button>
+                            <button class="btn btn-gold" id="loop-btn" onclick="toggleLoop()">🔁 تكرار السورة: متوقف</button>
+                        </div>
+
+                        <div class="control-row">
+                            <select id="surah-selector" style="flex:1;">
+                                <option value="" disabled selected>-- اختر سورة للقفز إليها فوراً (1 - 114) --</option>
+                            </select>
+                            <button class="btn btn-emerald" onclick="jumpToSurah()">🚀 بث السورة فوراً</button>
+                        </div>
+
+                        <div class="control-row">
+                            <select id="quality-selector" style="flex:1;">
+                                <option value="ultra_saver">⚡ وضع التوفير الفائق (240p - 5fps - يستهلك 25MB/ساعة)</option>
+                                <option value="eco" selected>🟢 الوضع الاقتصادي المتوازن (360p - 10fps - يستهلك 55MB/ساعة)</option>
+                                <option value="standard">✨ الوضع الواضح (480p - 15fps - يستهلك 120MB/ساعة)</option>
+                            </select>
+                            <button class="btn btn-slate" onclick="changeQuality()">🎞️ تطبيق الجودة</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- العمود الأيسر: مراقبة موارد الخادم والتخزين والشبكة -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📊 مؤشرات السيرفر والمساحة ومعدل النقل</div>
+                        <span style="font-size:0.78rem; color:#34d399;">تحديث حي كل ثانيتين</span>
+                    </div>
+
+                    <div class="telemetry-grid">
+                        <!-- المعالج CPU -->
+                        <div class="metric-box">
+                            <div class="metric-top"><span>⚡ استهلاك المعالج (CPU)</span><span class="metric-val" id="cpu-val">0%</span></div>
+                            <div class="mini-bar"><div class="mini-bar-fill" id="cpu-bar" style="background:var(--cyan);"></div></div>
+                            <div class="metric-sub"><span>محرك FFmpeg (ultrafast)</span><span>نبضات Ping: <strong id="pings">0</strong></span></div>
+                        </div>
+
+                        <!-- الذاكرة العشوائية RAM -->
+                        <div class="metric-box">
+                            <div class="metric-top"><span>🧠 الذاكرة (RAM)</span><span class="metric-val" id="ram-val">0%</span></div>
+                            <div class="mini-bar"><div class="mini-bar-fill" id="ram-bar" style="background:var(--gold);"></div></div>
+                            <div class="metric-sub"><span>استهلاك البوت: <strong id="app-ram">0 MB</strong></span><span>متاح: <strong id="ram-free">0 MB</strong></span></div>
+                        </div>
+
+                        <!-- حجم الملفات المحملة والمساحة المتبقية -->
+                        <div class="metric-box">
+                            <div class="metric-top"><span>💾 حجم السور المحمّلة</span><span class="metric-val" id="files-size" style="color:#34d399;">0 MB</span></div>
+                            <div class="mini-bar"><div class="mini-bar-fill" id="disk-bar" style="background:var(--emerald);"></div></div>
+                            <div class="metric-sub">
+                                <span>المحمل: <strong id="downloaded-count">0</strong>/114 سورة</span>
+                                <span>المتبقي بالقرص: <strong id="disk-free" style="color:#6ee7b7;">0 GB</strong></span>
+                            </div>
+                        </div>
+
+                        <!-- معدل نقل البيانات وإجمالي الاستهلاك -->
+                        <div class="metric-box">
+                            <div class="metric-top"><span>🌐 سرعة الرفع (Bitrate)</span><span class="metric-val" id="up-speed" style="color:#38bdf8;">0 KB/s</span></div>
+                            <div class="mini-bar"><div class="mini-bar-fill" id="net-bar" style="width:45%; background:#38bdf8;"></div></div>
+                            <div class="metric-sub">
+                                <span>إجمالي المرفوع: <strong id="total-sent">0 MB</strong></span>
+                                <span>التحميل: <strong id="total-recv">0 MB</strong></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- أزرار إدارة الدفعات السحابية -->
+                    <div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <span style="font-size:0.85rem; color:var(--text-muted);">☁️ فحص وتحميل دفعات Google Drive يدوياً:</span>
+                        <div style="display:flex; gap:6px;">
+                            <button class="btn btn-slate" onclick="prefetchBatch(1)">📥 دفعة 1 (1-50)</button>
+                            <button class="btn btn-slate" onclick="prefetchBatch(2)">📥 دفعة 2 (51-100)</button>
+                            <button class="btn btn-slate" onclick="prefetchBatch(3)">📥 دفعة 3 (101-114)</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- القسم السفلي: خريطة السور الـ 114 + سجل السيرفر الحي -->
+            <div class="main-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📖 خريطة حالة السور الـ 114 (انقر على أي سورة لبثها فوراً)</div>
+                        <div style="font-size:0.78rem; display:flex; gap:10px;">
+                            <span style="color:#fbbf24;">● تُبث الآن</span>
+                            <span style="color:#34d399;">● محمّلة بالقرص</span>
+                            <span style="color:#64748b;">● غير محمّلة</span>
+                        </div>
+                    </div>
+                    <div class="surah-matrix" id="surah-matrix"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">💻 السجل الحي للخادم (Live Server Logs)</div>
+                        <span style="font-size:0.78rem; color:var(--text-muted);" id="last-ping">آخر نبضة: -</span>
+                    </div>
+                    <div class="terminal-box" id="terminal-logs"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="toast" class="toast"></div>
+
+        <script>
+            let surahsInitialized = false;
+
+            function showToast(msg, isErr = false) {
+                const t = document.getElementById('toast');
+                t.textContent = msg;
+                t.style.borderColor = isErr ? '#ef4444' : '#10b981';
+                t.style.display = 'block';
+                setTimeout(() => t.style.display = 'none', 4000);
+            }
+
+            async function sendAdminCmd(endpoint) {
+                const pass = document.getElementById('admin-pass').value;
+                if (!pass) {
+                    showToast('🔑 يرجى كتابة كلمة مرور المشرف أولاً!', true);
+                    document.getElementById('admin-pass').focus();
+                    return null;
+                }
+                try {
+                    const res = await fetch(endpoint, { method: 'POST', headers: { 'password': pass } });
+                    const data = await res.json();
+                    if (res.ok) {
+                        showToast(data.message);
+                        fetchStatus();
+                        return data;
+                    } else {
+                        showToast(data.detail || 'فشل الأمر', true);
+                    }
+                } catch (e) {
+                    showToast('خطأ في الاتصال بالخادم', true);
+                }
+                return null;
+            }
+
+            function skipSurah() { sendAdminCmd('/api/skip'); }
+            function toggleLoop() { sendAdminCmd('/api/loop'); }
+            function jumpToSurah(idxOverride = null) {
+                const idx = idxOverride || document.getElementById('surah-selector').value;
+                if (!idx) { showToast('اختر السورة أولاً', true); return; }
+                sendAdminCmd(`/api/jump/${idx}`);
+            }
+            function changeQuality() {
+                const q = document.getElementById('quality-selector').value;
+                sendAdminCmd(`/api/quality/${q}`);
+            }
+            function prefetchBatch(num) {
+                sendAdminCmd(`/api/prefetch/${num}`);
+            }
+
+            async function fetchStatus() {
+                try {
+                    const res = await fetch('/api/status');
+                    const d = await res.json();
+
+                    document.getElementById('status-badge').textContent = d.status;
+                    document.getElementById('channel-id').textContent = d.channel_id;
+                    document.getElementById('khatmas').textContent = d.completed_khatmas;
+                    document.getElementById('uptime').textContent = d.uptime_formatted;
+                    document.getElementById('surah-num').textContent = d.current_surah_index;
+                    document.getElementById('surah-name').textContent = d.current_surah_name;
+                    document.getElementById('next-surah').textContent = d.next_surah_name;
+                    document.getElementById('current-file-label').textContent = d.current_file;
+
+                    document.getElementById('elapsed').textContent = d.elapsed_formatted;
+                    document.getElementById('remaining').textContent = d.remaining_formatted;
+                    document.getElementById('duration').textContent = d.duration_formatted;
+                    document.getElementById('progress-text').textContent = d.progress_pct + '%';
+                    document.getElementById('progress-fill').style.width = d.progress_pct + '%';
+
+                    // تحديث زر التكرار
+                    const loopBtn = document.getElementById('loop-btn');
+                    if (d.loop_current_surah) {
+                        loopBtn.classList.add('active');
+                        loopBtn.textContent = '🔁 تكرار السورة: مفعّل';
+                    } else {
+                        loopBtn.classList.remove('active');
+                        loopBtn.textContent = '🔁 تكرار السورة: متوقف';
+                    }
+
+                    // تحديث مقاييس السيرفر والقرص والشبكة
+                    if (d.telemetry && d.storage) {
+                        document.getElementById('cpu-val').textContent = d.telemetry.cpu_percent + '%';
+                        document.getElementById('cpu-bar').style.width = Math.min(100, d.telemetry.cpu_percent) + '%';
+
+                        document.getElementById('ram-val').textContent = d.telemetry.ram_percent + '%';
+                        document.getElementById('ram-bar').style.width = Math.min(100, d.telemetry.ram_percent) + '%';
+                        document.getElementById('app-ram').textContent = d.telemetry.app_ram_formatted;
+                        document.getElementById('ram-free').textContent = d.telemetry.ram_free_formatted;
+
+                        document.getElementById('files-size').textContent = d.storage.downloaded_size_formatted;
+                        document.getElementById('downloaded-count').textContent = d.storage.downloaded_count;
+                        document.getElementById('disk-free').textContent = d.storage.disk_free_formatted;
+                        document.getElementById('disk-bar').style.width = Math.min(100, d.storage.disk_percent) + '%';
+
+                        document.getElementById('up-speed').textContent = d.telemetry.upload_speed_kbps + ' KB/s';
+                        document.getElementById('total-sent').textContent = d.telemetry.total_sent_formatted;
+                        document.getElementById('total-recv').textContent = d.telemetry.total_recv_formatted;
+                    }
+
+                    document.getElementById('pings').textContent = d.ping_count;
+                    document.getElementById('last-ping').textContent = 'آخر Ping: ' + d.last_ping_time;
+
+                    // بناء القائمة المنسدلة وخريطة السور مرة واحدة
+                    if (!surahsInitialized && d.surah_names) {
+                        const sel = document.getElementById('surah-selector');
+                        const matrix = document.getElementById('surah-matrix');
+                        matrix.innerHTML = '';
+                        d.surah_names.forEach((name, i) => {
+                            const idx = i + 1;
+                            const opt = document.createElement('option');
+                            opt.value = idx;
+                            opt.textContent = `${idx}. سورة ${name}`;
+                            sel.appendChild(opt);
+
+                            const cell = document.createElement('div');
+                            cell.className = 'surah-cell';
+                            cell.id = `cell-surah-${idx}`;
+                            cell.textContent = `${idx}. ${name}`;
+                            cell.title = `انقر لبث سورة ${name} فوراً`;
+                            cell.onclick = () => jumpToSurah(idx);
+                            matrix.appendChild(cell);
+                        });
+                        surahsInitialized = true;
+                    }
+
+                    // تلوين خريطة السور حسب المحمل والمشتغل حالياً
+                    if (surahsInitialized && d.storage) {
+                        const dlSet = new Set(d.storage.downloaded_indices);
+                        for (let idx = 1; idx <= 114; idx++) {
+                            const cell = document.getElementById(`cell-surah-${idx}`);
+                            if (!cell) continue;
+                            cell.className = 'surah-cell';
+                            if (idx === d.current_surah_index) {
+                                cell.classList.add('playing');
+                            } else if (dlSet.has(idx)) {
+                                cell.classList.add('downloaded');
+                            }
+                        }
+                    }
+
+                    // تحديث شاشة السجلات الحية
+                    if (d.logs) {
+                        const term = document.getElementById('terminal-logs');
+                        term.innerHTML = d.logs.map(line => {
+                            let cls = 'log-line';
+                            if (line.includes('ERROR') || line.includes('CRITICAL')) cls += ' err';
+                            else if (line.includes('بدأ بث') || line.includes('اكتمل')) cls += ' ok';
+                            return `<div class="${cls}">${line}</div>`;
+                        }).join('');
+                        term.scrollTop = term.scrollHeight;
+                    }
+                } catch (e) {}
+            }
+
+            fetchStatus();
+            setInterval(fetchStatus, 2000);
+        </script>
+    </body>
+    </html>
